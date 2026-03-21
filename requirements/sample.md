@@ -1,0 +1,346 @@
+# CloudSeeder — Sample Config Files
+
+All files under the `config/` folder. These define the pipeline, constants, seed data, and per-object mapping configs.
+
+---
+
+## Folder Structure
+
+```
+config/
+├── constants.json                  # Shared constants referenced as ${constants.*}
+├── pipeline.json                   # Pipeline step definitions and execution order
+└── sales/
+    ├── data/
+    │   └── seed.json               # Seed records: Account, Contact, Opportunity
+    └── mappings/
+        ├── Account.json            # Account transform/upsert mapping
+        ├── Contact.json            # Contact transform/upsert mapping
+        └── Opportunity.json        # Opportunity transform/upsert mapping
+```
+
+---
+
+## `config/constants.json`
+
+Shared values available as `${constants.<path>}` in any mapping default, transform, or seed data field.
+
+```json
+{
+  "oppty": {
+    "defaultStageName": "Prospecting",
+    "defaultCloseDate": "2025-09-30"
+  }
+}
+```
+
+---
+
+## `config/pipeline.json`
+
+Defines which objects to load, in what order. Steps are topologically sorted by `dependsOn` before execution. Each step points to its data file, data key within that file, and its mapping config.
+
+```json
+{
+  "dryRun": false,
+
+  "steps": [
+    {
+      "object": "Account",
+      "dataFile": "./config/sales/data/seed.json",
+      "dataKey": "Account",
+      "mode": "direct",
+      "configFile": "./config/sales/mappings/Account.json",
+      "dependsOn": []
+    },
+    {
+      "object": "Contact",
+      "dataFile": "./config/sales/data/seed.json",
+      "dataKey": "Contact",
+      "mode": "direct",
+      "configFile": "./config/sales/mappings/Contact.json",
+      "dependsOn": ["Account"]
+    },
+    {
+      "object": "Opportunity",
+      "dataFile": "./config/sales/data/seed.json",
+      "dataKey": "Opportunity",
+      "mode": "direct",
+      "configFile": "./config/sales/mappings/Opportunity.json",
+      "dependsOn": ["Account", "Contact"]
+    }
+  ]
+}
+```
+
+**Step fields reference:**
+
+| Field | Required | Description |
+|---|---|---|
+| `object` | Yes | Salesforce API object name |
+| `dataFile` | Yes | Path to seed data file (repo-root relative) |
+| `dataKey` | No | Key within the data file (omit if root is an array) |
+| `mode` | No | `"direct"` (default) or `"generate"` |
+| `configFile` | Yes | Path to object mapping config |
+| `dependsOn` | No | Objects that must complete before this step |
+| `filter` | No | Declarative predicate(s) to subset records |
+| `generator` | No | Generator name (only when `mode: "generate"`) |
+| `configInline` | No | Inline mapping overrides (highest precedence) |
+
+---
+
+## `config/sales/mappings/Account.json`
+
+Account is the root object — no references to other objects. Uses Bulk API upsert keyed on `External_Id__c`.
+
+```json
+{
+  "identify": { "matchKey": "External_Id__c" },
+
+  "shape": {
+    "fieldMap": {},
+    "defaults": {
+      "Type": "Customer"
+    },
+    "removeFields": []
+  },
+
+  "transform": {
+    "pre": [],
+    "post": []
+  },
+
+  "references": [],
+
+  "validate": {
+    "requiredFields": ["Name", "External_Id__c"],
+    "uniqueBy": ["External_Id__c"]
+  },
+
+  "strategy": {
+    "operation": "upsert",
+    "externalIdField": "External_Id__c",
+    "api": "bulk",
+    "batchSize": 200
+  }
+}
+```
+
+---
+
+## `config/sales/mappings/Contact.json`
+
+Contact links to Account via `AccountId`. The seed field `AccountExternalId` is used to look up the Account's Salesforce Id from `idMaps`, then removed in the post transform before committing.
+
+```json
+{
+  "identify": { "matchKey": "External_Id__c" },
+
+  "shape": {
+    "fieldMap": {},
+    "defaults": {},
+    "removeFields": []
+  },
+
+  "transform": {
+    "pre": [],
+    "post": [
+      { "op": "remove", "field": "AccountExternalId" }
+    ]
+  },
+
+  "references": [
+    {
+      "field": "AccountId",
+      "refObject": "Account",
+      "refKey": "${AccountExternalId}",
+      "required": true
+    }
+  ],
+
+  "validate": {
+    "requiredFields": ["External_Id__c", "LastName", "AccountId"],
+    "uniqueBy": ["External_Id__c"]
+  },
+
+  "strategy": {
+    "operation": "upsert",
+    "externalIdField": "External_Id__c",
+    "api": "rest",
+    "batchSize": 200
+  }
+}
+```
+
+---
+
+## `config/sales/mappings/Opportunity.json`
+
+Opportunity links to Account. `StageName` and `CloseDate` fall back to constants if not present in the seed record. The helper field `AccountExternalId` is removed after reference resolution.
+
+```json
+{
+  "identify": { "matchKey": "External_Id__c" },
+
+  "shape": {
+    "fieldMap": {},
+    "defaults": {
+      "StageName": "${constants.oppty.defaultStageName}",
+      "CloseDate": "${constants.oppty.defaultCloseDate}"
+    },
+    "removeFields": []
+  },
+
+  "transform": {
+    "pre": [],
+    "post": [
+      { "op": "remove", "field": "AccountExternalId" }
+    ]
+  },
+
+  "references": [
+    {
+      "field": "AccountId",
+      "refObject": "Account",
+      "refKey": "${AccountExternalId}",
+      "required": true
+    }
+  ],
+
+  "validate": {
+    "requiredFields": ["External_Id__c", "Name", "StageName", "CloseDate", "AccountId"],
+    "uniqueBy": ["External_Id__c"]
+  },
+
+  "strategy": {
+    "operation": "upsert",
+    "externalIdField": "External_Id__c",
+    "api": "bulk",
+    "batchSize": 200
+  }
+}
+```
+
+---
+
+## `config/sales/data/seed.json`
+
+Sample seed data: 20 Accounts, 20 Contacts (linked via `AccountExternalId`), 20 Opportunities (linked via `AccountExternalId`). The `AccountExternalId` field is a helper used by the reference resolver — it is removed before records are committed to Salesforce.
+
+```json
+{
+  "Account": [
+    { "External_Id__c": "acct-001", "Name": "Acme Corp" },
+    { "External_Id__c": "acct-002", "Name": "Global Dynamics Inc" },
+    { "External_Id__c": "acct-003", "Name": "Horizon Technologies" },
+    { "External_Id__c": "acct-004", "Name": "Synergy Solutions" },
+    { "External_Id__c": "acct-005", "Name": "Pinnacle Group" },
+    { "External_Id__c": "acct-006", "Name": "Quantum Systems" },
+    { "External_Id__c": "acct-007", "Name": "Apex Innovations" },
+    { "External_Id__c": "acct-008", "Name": "Summit Ventures" },
+    { "External_Id__c": "acct-009", "Name": "Transcend Media" },
+    { "External_Id__c": "acct-010", "Name": "Velocity Labs" },
+    { "External_Id__c": "acct-011", "Name": "Stellar Forge" },
+    { "External_Id__c": "acct-012", "Name": "Blue Sky Aviation" },
+    { "External_Id__c": "acct-013", "Name": "First Capital Bank" },
+    { "External_Id__c": "acct-014", "Name": "EcoGreen Energy" },
+    { "External_Id__c": "acct-015", "Name": "MediCore Health" },
+    { "External_Id__c": "acct-016", "Name": "Terra Nova Mining" },
+    { "External_Id__c": "acct-017", "Name": "Digital Reef" },
+    { "External_Id__c": "acct-018", "Name": "Precision Engineering" },
+    { "External_Id__c": "acct-019", "Name": "Gryphon Security" },
+    { "External_Id__c": "acct-020", "Name": "Aurora Creative" }
+  ],
+  "Contact": [
+    { "External_Id__c": "cont-001", "FirstName": "Sam",       "LastName": "Lee",       "Email": "sam.lee@acme.com",                  "AccountExternalId": "acct-001" },
+    { "External_Id__c": "cont-002", "FirstName": "Maria",     "LastName": "Garcia",    "Email": "maria.garcia@globaldynamics.com",    "AccountExternalId": "acct-002" },
+    { "External_Id__c": "cont-003", "FirstName": "David",     "LastName": "Chen",      "Email": "david.chen@horizontech.net",         "AccountExternalId": "acct-003" },
+    { "External_Id__c": "cont-004", "FirstName": "Jessica",   "LastName": "Scott",     "Email": "jessica.scott@synergysol.com",       "AccountExternalId": "acct-004" },
+    { "External_Id__c": "cont-005", "FirstName": "Ethan",     "LastName": "Black",     "Email": "ethan.black@pinnaclegroup.co",       "AccountExternalId": "acct-005" },
+    { "External_Id__c": "cont-006", "FirstName": "Chloe",     "LastName": "Davis",     "Email": "chloe.davis@quantumsys.com",         "AccountExternalId": "acct-006" },
+    { "External_Id__c": "cont-007", "FirstName": "Liam",      "LastName": "O'Connell", "Email": "liam.o.connell@apexinnov.com",       "AccountExternalId": "acct-007" },
+    { "External_Id__c": "cont-008", "FirstName": "Sophia",    "LastName": "Wang",      "Email": "sophia.wang@summitventures.net",     "AccountExternalId": "acct-008" },
+    { "External_Id__c": "cont-009", "FirstName": "Noah",      "LastName": "Patel",     "Email": "noah.patel@transcendmedia.org",      "AccountExternalId": "acct-009" },
+    { "External_Id__c": "cont-010", "FirstName": "Olivia",    "LastName": "Rodriguez", "Email": "olivia.rodriguez@velocitylabs.io",   "AccountExternalId": "acct-010" },
+    { "External_Id__c": "cont-011", "FirstName": "James",     "LastName": "Wilson",    "Email": "james.wilson@stellarforge.com",      "AccountExternalId": "acct-011" },
+    { "External_Id__c": "cont-012", "FirstName": "Emily",     "LastName": "Clark",     "Email": "emily.clark@bluesky.aero",           "AccountExternalId": "acct-012" },
+    { "External_Id__c": "cont-013", "FirstName": "Ben",       "LastName": "Harris",    "Email": "ben.harris@firstcapital.com",        "AccountExternalId": "acct-013" },
+    { "External_Id__c": "cont-014", "FirstName": "Mia",       "LastName": "Turner",    "Email": "mia.turner@ecogreen.org",            "AccountExternalId": "acct-014" },
+    { "External_Id__c": "cont-015", "FirstName": "Lucas",     "LastName": "Adams",     "Email": "lucas.adams@medicore.com",           "AccountExternalId": "acct-015" },
+    { "External_Id__c": "cont-016", "FirstName": "Isabella",  "LastName": "King",      "Email": "isabella.king@terranova.com",        "AccountExternalId": "acct-016" },
+    { "External_Id__c": "cont-017", "FirstName": "Henry",     "LastName": "Baker",     "Email": "henry.baker@digitalreef.net",        "AccountExternalId": "acct-017" },
+    { "External_Id__c": "cont-018", "FirstName": "Amelia",    "LastName": "Hall",      "Email": "amelia.hall@precisioneng.com",       "AccountExternalId": "acct-018" },
+    { "External_Id__c": "cont-019", "FirstName": "Jacob",     "LastName": "Young",     "Email": "jacob.young@gryphonsec.com",         "AccountExternalId": "acct-019" },
+    { "External_Id__c": "cont-020", "FirstName": "Charlotte", "LastName": "Lopez",     "Email": "charlotte.lopez@auroracreative.biz", "AccountExternalId": "acct-020" }
+  ],
+  "Opportunity": [
+    { "External_Id__c": "opp-001", "Name": "Acme – Starter Deal",               "StageName": "Qualification",        "CloseDate": "2025-10-15", "Amount": 15000,  "AccountExternalId": "acct-001" },
+    { "External_Id__c": "opp-002", "Name": "Global – Expansion Project",        "StageName": "Perception Analysis",  "CloseDate": "2025-11-20", "Amount": 75000,  "AccountExternalId": "acct-002" },
+    { "External_Id__c": "opp-003", "Name": "Horizon – New License",             "StageName": "Value Proposition",    "CloseDate": "2025-12-01", "Amount": 45000,  "AccountExternalId": "acct-003" },
+    { "External_Id__c": "opp-004", "Name": "Synergy – Q4 Consulting",           "StageName": "Proposal/Price Quote", "CloseDate": "2025-12-30", "Amount": 90000,  "AccountExternalId": "acct-004" },
+    { "External_Id__c": "opp-005", "Name": "Pinnacle – Annual Contract",        "StageName": "Negotiation/Review",   "CloseDate": "2025-11-05", "Amount": 120000, "AccountExternalId": "acct-005" },
+    { "External_Id__c": "opp-006", "Name": "Quantum – System Upgrade",          "StageName": "Closed Won",           "CloseDate": "2025-09-15", "Amount": 60000,  "AccountExternalId": "acct-006" },
+    { "External_Id__c": "opp-007", "Name": "Apex – R&D Partnership",            "StageName": "Qualification",        "CloseDate": "2026-01-10", "Amount": 200000, "AccountExternalId": "acct-007" },
+    { "External_Id__c": "opp-008", "Name": "Summit – Media Buy",                "StageName": "Perception Analysis",  "CloseDate": "2025-10-25", "Amount": 35000,  "AccountExternalId": "acct-008" },
+    { "External_Id__c": "opp-009", "Name": "Transcend – Platform Integration",  "StageName": "Value Proposition",    "CloseDate": "2026-02-01", "Amount": 150000, "AccountExternalId": "acct-009" },
+    { "External_Id__c": "opp-010", "Name": "Velocity – Hardware Order",         "StageName": "Closed Lost",          "CloseDate": "2025-09-01", "Amount": 25000,  "AccountExternalId": "acct-010" },
+    { "External_Id__c": "opp-011", "Name": "Stellar – New Product Launch",      "StageName": "Proposal/Price Quote", "CloseDate": "2025-12-15", "Amount": 180000, "AccountExternalId": "acct-011" },
+    { "External_Id__c": "opp-012", "Name": "Blue Sky – Fleet Management",       "StageName": "Negotiation/Review",   "CloseDate": "2025-11-28", "Amount": 300000, "AccountExternalId": "acct-012" },
+    { "External_Id__c": "opp-013", "Name": "First Capital – ATM Contract",      "StageName": "Closed Won",           "CloseDate": "2025-10-05", "Amount": 95000,  "AccountExternalId": "acct-013" },
+    { "External_Id__c": "opp-014", "Name": "EcoGreen – Solar Installation",     "StageName": "Qualification",        "CloseDate": "2026-03-01", "Amount": 450000, "AccountExternalId": "acct-014" },
+    { "External_Id__c": "opp-015", "Name": "MediCore – Software Implementation","StageName": "Perception Analysis",  "CloseDate": "2025-12-10", "Amount": 110000, "AccountExternalId": "acct-015" },
+    { "External_Id__c": "opp-016", "Name": "Terra Nova – Equipment Lease",      "StageName": "Value Proposition",    "CloseDate": "2026-01-20", "Amount": 85000,  "AccountExternalId": "acct-016" },
+    { "External_Id__c": "opp-017", "Name": "Digital Reef – Data Storage",       "StageName": "Proposal/Price Quote", "CloseDate": "2025-11-15", "Amount": 55000,  "AccountExternalId": "acct-017" },
+    { "External_Id__c": "opp-018", "Name": "Precision – New Factory Line",      "StageName": "Negotiation/Review",   "CloseDate": "2026-02-15", "Amount": 250000, "AccountExternalId": "acct-018" },
+    { "External_Id__c": "opp-019", "Name": "Gryphon – Security Services",       "StageName": "Closed Won",           "CloseDate": "2025-10-20", "Amount": 70000,  "AccountExternalId": "acct-019" },
+    { "External_Id__c": "opp-020", "Name": "Aurora – Video Production",         "StageName": "Qualification",        "CloseDate": "2026-01-05", "Amount": 40000,  "AccountExternalId": "acct-020" }
+  ]
+}
+```
+
+---
+
+## Mapping Config Reference
+
+### `identify`
+| Field | Description |
+|---|---|
+| `matchKey` | Field used as the unique key for idMap lookups and upsert external ID |
+
+### `shape`
+| Field | Description |
+|---|---|
+| `fieldMap` | Rename source fields: `{ "OldName": "NewName" }` |
+| `defaults` | Set field value only if missing/undefined. Supports `${constants.*}` |
+| `removeFields` | Drop these fields before committing |
+
+### `transform`
+| Field | Description |
+|---|---|
+| `pre` | Transforms applied before shaping |
+| `post` | Transforms applied after reference resolution |
+
+**Transform `op` values:** `assign`, `copy`, `rename`, `remove`, `coalesce`, `concat`
+
+### `references`
+| Field | Description |
+|---|---|
+| `field` | Target Salesforce lookup field (e.g., `AccountId`) |
+| `refObject` | Source object name in idMaps (e.g., `Account`) |
+| `refKey` | Template string resolving to the lookup key (e.g., `${AccountExternalId}`) |
+| `required` | Throw if reference cannot be resolved (default: `true`) |
+| `onMissing` | `"error"` (default) \| `"null"` \| `"skip"` |
+
+### `validate`
+| Field | Description |
+|---|---|
+| `requiredFields` | Fields that must be non-empty before committing |
+| `uniqueBy` | Client-side uniqueness check across these fields |
+
+### `strategy`
+| Field | Description |
+|---|---|
+| `operation` | `"insert"` or `"upsert"` |
+| `externalIdField` | Salesforce External ID field name (upsert only) |
+| `api` | `"rest"` \| `"composite"` \| `"bulk"` |
+| `batchSize` | Records per batch (default: 200) |

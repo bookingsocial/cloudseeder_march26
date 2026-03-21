@@ -44,8 +44,8 @@ SF_LOGIN_URL=https://login.salesforce.com
 SF_USERNAME=you@example.com
 SF_PASSWORD=yourPasswordyourSecurityToken
 
-# Environment name — selects config/env/<LOADER_ENV>/ overlay files (default: dev)
-LOADER_ENV=dev
+# Environment name — selects config/env/<ENV_NAME>/ overlay files
+ENV_NAME=dev
 
 # Set to true to force re-fetch of Salesforce object metadata
 REFRESH_METADATA=false
@@ -58,6 +58,12 @@ LOG_LEVEL=info
 
 # Set to true to skip all Salesforce writes (transforms and logging still run)
 DRY_RUN=false
+
+# Set to true to log fields pruned by metadata validation (first 2 records per step)
+LOG_PRUNE=false
+
+# Set to true to emit detailed reference resolution traces
+DEBUG_REFS=false
 ```
 
 ### 2. Pipeline (`config/pipeline.json`)
@@ -143,13 +149,15 @@ Each step's `configFile` is a JSON file describing how to transform seed records
 }
 ```
 
-**`strategy.api` options**: `"rest"`, `"composite"`, `"bulk"`
+**`strategy.api` options**: `"rest"` `"composite"` `"bulk"`
 
-**`strategy.operation` options**: `"insert"`, `"upsert"`
+**`strategy.operation` options**: `"insert"` `"upsert"`
 
-**Transform `op` values**: `assign`, `copy`, `rename`, `remove`, `coalesce`, `concat`
+**Transform `op` values**: `assign` `copy` `rename` `remove` `coalesce` `concat`
 
-**Reference `onMissing` options**: `"error"` (default), `"null"`, `"skip"`
+**Reference `onMissing` options**: `"error"` (default) `"null"` `"skip"`
+
+> All config files support JSON5 syntax — comments (`//`, `/* */`) and trailing commas are allowed.
 
 ### 4. Constants (`config/constants.json`)
 
@@ -181,7 +189,7 @@ config/
         └── Account.json       # overrides Account mapping for "prod"
 ```
 
-Set `LOADER_ENV=prod` to activate the `prod` overlay.
+Set `ENV_NAME=prod` to activate the `prod` overlay.
 
 ---
 
@@ -240,7 +248,7 @@ DEBUG_REFS=true npm start
 ### Target a specific environment
 
 ```bash
-LOADER_ENV=prod npm start
+ENV_NAME=prod npm start
 ```
 
 ---
@@ -254,25 +262,38 @@ cloudseeder/
 ├── scripts/
 │   └── runLoad.js                # CLI entry point and pipeline orchestrator
 ├── lib/
-│   ├── auth.js                   # Salesforce login via jsforce
 │   ├── loader.js                 # Per-step transform + commit pipeline
-│   ├── sf.js                     # REST / Composite / Bulk commit strategies
 │   ├── filters.js                # Declarative record filter engine
-│   ├── runcontext.js             # Runtime singleton: org ID
-│   ├── metadata.min.js           # Metadata snapshot, pruning, validation
-│   ├── utils.min.js              # shapeRecord, applyTransforms, resolveConstantsDeep
 │   ├── config/
 │   │   ├── index.js              # Re-exports all config loaders
 │   │   ├── pipeline.js           # Load pipeline.json (+ env overlay)
 │   │   ├── constants.js          # Load constants.json (+ env overlay)
 │   │   ├── step-config.js        # Load + merge object mapping configs (cached)
+│   │   ├── env.js                # Environment variable helpers
 │   │   └── utils.js              # JSON5 reader, deepMerge
-│   ├── mapping/
+│   ├── pipeline/
+│   │   ├── orchestrator.js       # Pipeline orchestration logic
+│   │   ├── dataloader.js         # Data loading and batching
+│   │   ├── generators.js         # Built-in data generators
+│   │   └── toposort.js           # Topological sort for step ordering
+│   ├── salesforce/
+│   │   ├── auth.js               # Salesforce login via jsforce
+│   │   ├── commit.js             # REST / Composite / Bulk commit strategies
+│   │   ├── metadata.js           # Metadata snapshot, pruning, validation
+│   │   └── permset.js            # Permission Set + FLS management
+│   ├── transform/
+│   │   ├── index.js              # Re-exports transform functions
+│   │   ├── shape.js              # shapeRecord logic
+│   │   ├── transforms.js         # applyTransforms logic
+│   │   ├── constants.js          # resolveConstantsDeep logic
 │   │   └── ref-solver.js         # Foreign key reference resolution
-│   └── utils/
-│       ├── logger.js             # Leveled console logger
-│       ├── runlog.js             # Per-run file logger
-│       └── permset.js            # Permission Set + FLS management
+│   ├── utils/
+│   │   ├── logger.js             # Leveled console logger
+│   │   ├── duallogger.js         # Console + file dual logger
+│   │   ├── runlog.js             # Per-run file logger
+│   │   └── runcontext.js         # Runtime singleton: org ID
+│   └── validators/
+│       └── validatematchkeys.js  # Match key validation
 ├── services/
 │   └── generators.js             # Custom data generators
 ├── config/
@@ -286,13 +307,16 @@ cloudseeder/
 │           ├── Contact.json      # Contact mapping
 │           └── Opportunity.json  # Opportunity mapping
 ├── docs/
-│   ├── README.md                 # User-facing guide
+│   ├── README.md                 # Full config & API reference guide
 │   └── usecases/
-│       ├── sales.md              # Sales Cloud example walkthrough
-│       └── producthierarchy.md  # Product hierarchy example walkthrough
+│       ├── sales.md              # Account, Contact, Opportunity walkthrough
+│       ├── producthierarchy.md   # 3-level Product2 + Pricebook walkthrough
+│       └── fieldservice.md       # Locations, Experts, generated junctions & shifts
 ├── requirements/
 │   ├── requirements.md           # Functional and non-functional requirements
-│   └── implementation.md        # Architecture and module reference
+│   ├── implementation.md         # Architecture and module reference
+│   ├── code.md                   # Code-level reference
+│   └── sample.md                 # Sample configuration reference
 ├── meta-data/                    # (generated) Object describe cache
 │   └── <ORG_ID>/
 │       └── <Object>.json
@@ -331,11 +355,23 @@ Log file format:
 
 ---
 
-## Examples
+## Use Cases
 
-### End-to-End: Sales Cloud Pipeline
+End-to-end walkthroughs with seed data, pipeline config, mapping files, and execution flow:
 
-This example loads 20 Accounts, 20 Contacts (linked to Accounts), and 20 Opportunities (linked to Accounts) from the bundled seed data.
+| Use Case | Doc | Objects |
+|---|---|---|
+| Sales pipeline | [docs/usecases/sales.md](docs/usecases/sales.md) | Account, Contact, Opportunity |
+| Product hierarchy | [docs/usecases/producthierarchy.md](docs/usecases/producthierarchy.md) | Product2 (3-level), Pricebook2, PricebookEntry |
+| Field service | [docs/usecases/fieldservice.md](docs/usecases/fieldservice.md) | Locations (hierarchy), Experts, generated junctions & shift patterns |
+
+For the full config and API reference see [docs/README.md](docs/README.md).
+
+---
+
+## Quick Example: Sales Cloud Pipeline
+
+This example loads 20 Accounts, 20 Contacts (linked to Accounts), and 20 Opportunities (linked to Accounts) from the bundled seed data. See [docs/usecases/sales.md](docs/usecases/sales.md) for the full walkthrough.
 
 **1. Configure `.env`**
 
